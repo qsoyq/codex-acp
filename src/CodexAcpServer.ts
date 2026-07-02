@@ -68,6 +68,11 @@ import {
 import packageJson from "../package.json";
 import {isJetBrains2026_1Client} from "./JBUtils";
 import {resolveTerminalOutputMode, type TerminalOutputMode} from "./TerminalOutputMode";
+import {
+    createAgentTextMessageChunk,
+    createAgentTextThoughtChunk,
+    createUserMessageChunk,
+} from "./ContentChunks";
 
 export interface ThreadGoalSnapshot {
     objective: string;
@@ -981,6 +986,7 @@ export class CodexAcpServer {
             case "agentMessage":
                 return [{
                     sessionUpdate: "agent_message_chunk",
+                    messageId: item.id,
                     content: { type: "text", text: item.text },
                 }];
             case "reasoning":
@@ -1020,13 +1026,11 @@ export class CodexAcpServer {
 
     private createUserMessageUpdates(item: ThreadItem & { type: "userMessage" }): UpdateSessionEvent[] {
         const updates: UpdateSessionEvent[] = [];
+        const messageId = item.id;
         for (const input of item.content) {
             const blocks = this.userInputToContentBlocks(input);
             for (const block of blocks) {
-                updates.push({
-                    sessionUpdate: "user_message_chunk",
-                    content: block,
-                });
+                updates.push(createUserMessageChunk(block, messageId));
             }
         }
         return updates;
@@ -1034,10 +1038,8 @@ export class CodexAcpServer {
 
     private createReasoningUpdates(item: ThreadItem & { type: "reasoning" }): UpdateSessionEvent[] {
         const parts = item.summary.length > 0 ? item.summary : item.content;
-        return parts.map((text) => ({
-            sessionUpdate: "agent_thought_chunk",
-            content: { type: "text", text: text },
-        }));
+        const messageId = item.id;
+        return parts.map((text) => createAgentTextThoughtChunk(text, messageId));
     }
 
     private createWebSearchUpdate(
@@ -1604,13 +1606,7 @@ export class CodexAcpServer {
         }
         await this.connection.notify(acp.methods.client.session.update, {
             sessionId,
-            update: {
-                sessionUpdate: "agent_message_chunk",
-                content: {
-                    type: "text",
-                    text: "*Conversation interrupted*"
-                }
-            }
+            update: createAgentTextMessageChunk("*Conversation interrupted*"),
         });
     }
 
@@ -1689,26 +1685,33 @@ function mergeHistoryUpdates(
         merged.push(update);
     };
 
-    const flushFallbackThrough = (targetKey: string): boolean => {
-        const matchIndex = responseItemFallbackUpdates.findIndex((update, index) => (
-            index >= fallbackIndex && historyUpdateKey(update) === targetKey
-        ));
-        if (matchIndex === -1) {
-            return false;
+    const flushFallbackBeforeMatchingDuplicate = (targetUpdate: UpdateSessionEvent): void => {
+        const targetKey = historyUpdateKey(targetUpdate);
+        const targetContentKey = historyUpdateContentKey(targetUpdate);
+        if (!targetKey && !targetContentKey) {
+            return;
         }
 
-        while (fallbackIndex <= matchIndex) {
+        const matchIndex = responseItemFallbackUpdates.findIndex((update, index) => (
+            index >= fallbackIndex
+            && (
+                (targetKey !== null && historyUpdateKey(update) === targetKey)
+                || (targetContentKey !== null && historyUpdateContentKey(update) === targetContentKey)
+            )
+        ));
+        if (matchIndex === -1) {
+            return;
+        }
+
+        while (fallbackIndex < matchIndex) {
             pushUpdate(responseItemFallbackUpdates[fallbackIndex]!);
             fallbackIndex += 1;
         }
-        return true;
+        fallbackIndex += 1;
     };
 
     for (const update of threadUpdates) {
-        const key = historyUpdateKey(update);
-        if (key && flushFallbackThrough(key)) {
-            continue;
-        }
+        flushFallbackBeforeMatchingDuplicate(update);
         pushUpdate(update);
     }
 
@@ -1725,13 +1728,24 @@ function historyUpdateKey(update: UpdateSessionEvent): string | null {
         case "user_message_chunk":
         case "agent_message_chunk":
         case "agent_thought_chunk":
-            return `${update.sessionUpdate}:${JSON.stringify(update.content)}`;
+            return `${update.sessionUpdate}:${update.messageId ?? ""}:${JSON.stringify(update.content)}`;
         case "tool_call":
             return `tool_call:${update.toolCallId}:start`;
         case "tool_call_update":
             return `tool_call:${update.toolCallId}:update`;
         default:
             return null;
+    }
+}
+
+function historyUpdateContentKey(update: UpdateSessionEvent): string | null {
+    switch (update.sessionUpdate) {
+        case "user_message_chunk":
+        case "agent_message_chunk":
+        case "agent_thought_chunk":
+            return `${update.sessionUpdate}:${JSON.stringify(update.content)}`;
+        default:
+            return historyUpdateKey(update);
     }
 }
 

@@ -173,6 +173,7 @@ describe("CodexEventHandler - thread goal events", () => {
         expect(events).toHaveLength(2);
         expect(events[0]!.args[0].update).toEqual({
             sessionUpdate: "agent_message_chunk",
+            messageId: "message-1",
             content: {
                 type: "text",
                 text: "Because they kept losing interest in `any`.",
