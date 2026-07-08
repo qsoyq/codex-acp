@@ -142,5 +142,6 @@ jobs:
             fi
 
             gh pr close "$pr_number" \
+              --delete-branch \
               --comment "Closing obsolete update PR"
           done
